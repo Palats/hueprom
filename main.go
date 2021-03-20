@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,11 +14,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-)
-
-var (
-	user = flag.String("user", "", "Hue username")
-	port = flag.Int("port", 7362, "Port to serve on")
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -130,7 +125,7 @@ func (s *Server) step(ctx context.Context) error {
 	return nil
 }
 
-func find() {
+func createUser(ctx context.Context) error {
 	bridge, err := huego.Discover()
 	if err != nil {
 		glog.Exit(err)
@@ -144,22 +139,24 @@ func find() {
 		//  Description == "link button not pressed"
 		v := err.(*huego.APIError)
 		fmt.Println("addr:", v.Address, "type:", v.Type, "desc:", v.Description)
-		glog.Exit(err)
+		return err
 	}
 	fmt.Println("user:", user)
-	// bridge = bridge.Login(user)
-	// light, _ := bridge.GetLight(3)
-	// light.Off()
+	return nil
 }
 
-func dump(ctx context.Context) error {
-	bridge := huego.New("192.168.88.104", *user)
-	/*l, err := bridge.GetLights()
+func dump(ctx context.Context, user string) error {
+	bridge := huego.New("192.168.88.104", user)
+
+	fmt.Println("# -------- Lights --------")
+	lights, err := bridge.GetLights()
 	if err != nil {
-		panic(err)
+		return err
 	}
-	fmt.Printf("Found %d lights", len(l))
-	spew.Dump(l)*/
+	spew.Dump(lights)
+
+	fmt.Println()
+	fmt.Println("# -------- Sensors --------")
 	sensors, err := bridge.GetSensorsContext(ctx)
 	if err != nil {
 		return err
@@ -168,10 +165,10 @@ func dump(ctx context.Context) error {
 	return nil
 }
 
-func serve(ctx context.Context) error {
+func serve(ctx context.Context, user string, port int) error {
 	http.Handle("/metrics", promhttp.Handler())
 
-	bridge := huego.New("192.168.88.104", *user)
+	bridge := huego.New("192.168.88.104", user)
 	s := New(bridge)
 	go func() {
 		err := s.loop(ctx)
@@ -179,7 +176,7 @@ func serve(ctx context.Context) error {
 	}()
 	http.HandleFunc("/", s.Serve)
 
-	addr := fmt.Sprintf(":%d", *port)
+	addr := fmt.Sprintf(":%d", port)
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = ""
@@ -191,8 +188,41 @@ func serve(ctx context.Context) error {
 func main() {
 	ctx := context.Background()
 	fmt.Println("Hueprom")
-	flag.Parse()
-	if err := serve(ctx); err != nil {
-		glog.Error(err)
+
+	var user string
+	var port int
+
+	cmdServe := &cobra.Command{
+		Use:   "serve",
+		Short: "Run the Prometheus metrics exporter",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return serve(ctx, user, port)
+		},
 	}
+	cmdServe.PersistentFlags().IntVar(&port, "port", 7362, "HTTP port to listen on")
+
+	cmdDump := &cobra.Command{
+		Use:   "dump",
+		Short: "Dump Hue state.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return dump(ctx, user)
+		},
+	}
+
+	cmdCreateUser := &cobra.Command{
+		Use:   "create-user",
+		Short: "Create a new user on the bridge. Click the button just before running that command.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return createUser(ctx)
+		},
+	}
+
+	cmdRoot := &cobra.Command{Use: "app"}
+	cmdRoot.PersistentFlags().StringVar(&user, "user", "", "Hue username")
+	cmdRoot.AddCommand(cmdServe, cmdCreateUser, cmdDump)
+
+	cmdRoot.Execute()
 }
