@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
@@ -22,10 +24,20 @@ var (
 		Name: "hue_sensor_lastupdated",
 		Help: "Last update of the sense, in ms since epoch.",
 	}, []string{"name", "uniqueid"})
+	mLightOn = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hue_light_on",
+		Help: "Is the light set to on on the Bridge.",
+	}, []string{"name", "uniqueid"})
+	mLightReachable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hue_light_reachable",
+		Help: "Is the light reachable.",
+	}, []string{"name", "uniqueid"})
 )
 
 func init() {
 	prometheus.MustRegister(mSensorLastUpdated)
+	prometheus.MustRegister(mLightOn)
+	prometheus.MustRegister(mLightReachable)
 }
 
 const timeFormat = "2006-01-02T15:04:05"
@@ -35,6 +47,13 @@ var indexTpl = template.Must(template.New("index").Parse(`
 Philips Hue to Prometheus exporter.
 </body></html>
 `))
+
+func b2f(b bool) float64 {
+	if b {
+		return 1.0
+	}
+	return 0.0
+}
 
 type Server struct {
 	bridge *huego.Bridge
@@ -56,34 +75,6 @@ func (s *Server) Serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loop(ctx context.Context) error {
-	/*sensors, err := s.bridge.GetSensorsContext(ctx)
-	if err != nil {
-		return err
-	}
-
-	var sID int
-	for _, s := range sensors {
-		fmt.Printf("Sensor %d: %s [%s/%s]\n", s.ID, s.Name, s.Type, s.ModelID)
-		if s.Name == "Hue dimmer switch 1" {
-			sID = s.ID
-			spew.Dump(s)
-		}
-	}
-	if sID == 0 {
-		glog.Exit("Sensor not found")
-	}
-
-	for {
-		s, err := s.bridge.GetSensorContext(ctx, sID)
-		if err != nil {
-			glog.Exit(err)
-		}
-		buttonevent := s.State["buttonevent"]
-		lastupdated := s.State["lastupdated"]
-		fmt.Printf("buttonevent: %v, lastupdated: %v\n", buttonevent, lastupdated)
-		time.Sleep(time.Second)
-	}*/
-
 	for {
 		if err := s.step(ctx); err != nil {
 			glog.Error(err)
@@ -98,6 +89,20 @@ func (s *Server) loop(ctx context.Context) error {
 }
 
 func (s *Server) step(ctx context.Context) error {
+	lights, err := s.bridge.GetLightsContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, l := range lights {
+		labels := prometheus.Labels{
+			"name":     l.Name,
+			"uniqueid": l.UniqueID,
+		}
+		mLightOn.With(labels).Set(b2f(l.State.On))
+		mLightReachable.With(labels).Set(b2f(l.State.Reachable))
+	}
+
 	sensors, err := s.bridge.GetSensorsContext(ctx)
 	if err != nil {
 		return err
@@ -145,8 +150,11 @@ func createUser(ctx context.Context) error {
 	return nil
 }
 
-func dump(ctx context.Context, user string) error {
-	bridge := huego.New("192.168.88.104", user)
+func dump(ctx context.Context, fl *Flags) error {
+	bridge, err := fl.Bridge()
+	if err != nil {
+		return err
+	}
 
 	fmt.Println("# -------- Lights --------")
 	lights, err := bridge.GetLights()
@@ -165,10 +173,15 @@ func dump(ctx context.Context, user string) error {
 	return nil
 }
 
-func serve(ctx context.Context, user string, port int) error {
+// serve implements the `server` command. It polls periodically the bridge and
+// export the data as Prometheus metrics.
+func serve(ctx context.Context, fl *Flags) error {
 	http.Handle("/metrics", promhttp.Handler())
 
-	bridge := huego.New("192.168.88.104", user)
+	bridge, err := fl.Bridge()
+	if err != nil {
+		return err
+	}
 	s := New(bridge)
 	go func() {
 		err := s.loop(ctx)
@@ -176,7 +189,7 @@ func serve(ctx context.Context, user string, port int) error {
 	}()
 	http.HandleFunc("/", s.Serve)
 
-	addr := fmt.Sprintf(":%d", port)
+	addr := fmt.Sprintf(":%d", fl.Port)
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = ""
@@ -185,29 +198,45 @@ func serve(ctx context.Context, user string, port int) error {
 	return http.ListenAndServe(addr, nil)
 }
 
+// Flags hold the value of all command flags.
+type Flags struct {
+	User string
+	Port int
+}
+
+// Bridge provides the default bridge instance, using the user from the flags.
+func (fl *Flags) Bridge() (*huego.Bridge, error) {
+	bridge, err := huego.Discover()
+	if err != nil {
+		return nil, err
+	}
+	glog.Infof("Bridge ID: %v", bridge.ID)
+	glog.Infof("Bridge host: %v", bridge.Host)
+	return bridge.Login(fl.User), nil
+}
+
 func main() {
 	ctx := context.Background()
 	fmt.Println("Hueprom")
 
-	var user string
-	var port int
+	fl := &Flags{}
 
 	cmdServe := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the Prometheus metrics exporter",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return serve(ctx, user, port)
+			return serve(ctx, fl)
 		},
 	}
-	cmdServe.PersistentFlags().IntVar(&port, "port", 7362, "HTTP port to listen on")
+	cmdServe.PersistentFlags().IntVar(&fl.Port, "port", 7362, "HTTP port to listen on")
 
 	cmdDump := &cobra.Command{
 		Use:   "dump",
 		Short: "Dump Hue state.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return dump(ctx, user)
+			return dump(ctx, fl)
 		},
 	}
 
@@ -220,9 +249,20 @@ func main() {
 		},
 	}
 
-	cmdRoot := &cobra.Command{Use: "app"}
-	cmdRoot.PersistentFlags().StringVar(&user, "user", "", "Hue username")
+	cmdRoot := &cobra.Command{
+		Use: "app",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// flag.Parse()
+		},
+	}
+	cmdRoot.PersistentFlags().StringVar(&fl.User, "user", "", "Hue username")
 	cmdRoot.AddCommand(cmdServe, cmdCreateUser, cmdDump)
+
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	// Fake parse the default Go flags - that appease glog, which otherwise
+	// complains on each line. goflag.CommandLine do get parsed in parsed
+	// through pflag and `AddGoFlagSet`.
+	flag.CommandLine.Parse(nil)
 
 	cmdRoot.Execute()
 }
