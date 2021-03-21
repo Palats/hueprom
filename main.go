@@ -80,7 +80,7 @@ type SensorState struct {
 type Server struct {
 	bridge *huego.Bridge
 
-	// Map per unique-id
+	// See scanSensor for the key.
 	sensors map[string]*SensorState
 }
 
@@ -143,25 +143,26 @@ func (s *Server) scanSensors(ctx context.Context) error {
 	states := make(map[string]*SensorState)
 
 	for _, sensor := range sensors {
+		key := fmt.Sprintf("%q [%s]", sensor.Name, sensor.UniqueID)
 		state := &SensorState{
 			Labels: prometheus.Labels{
 				"name":     sensor.Name,
 				"uniqueid": sensor.UniqueID,
 			},
 		}
-		states[sensor.UniqueID] = state
+		states[key] = state
 
 		if strLastupdated, ok := sensor.State["lastupdated"].(string); ok && strLastupdated != "none" {
 			state.Lastupdated, err = time.Parse(timeFormat, strLastupdated)
 			if err != nil {
-				glog.Errorf("unable to parse %q: %v\n", strLastupdated, err)
+				glog.Errorf("Sensor %s, unable to parse %q: %v\n", key, strLastupdated, err)
 			}
 		}
 
 		if _, ok := sensor.State["buttonevent"]; ok {
 			floatButtonevent, ok := sensor.State["buttonevent"].(float64)
 			if !ok {
-				glog.Errorf("unable to read buttonevent %v as float", sensor.State["buttonevent"])
+				glog.Errorf("Sensor %s, unable to read buttonevent %v as float", key, sensor.State["buttonevent"])
 			}
 			state.Buttonevent = int64(floatButtonevent)
 		}
@@ -193,17 +194,17 @@ func (s *Server) scanSensors(ctx context.Context) error {
 		}
 
 		// And deal with events.
-		if oldState := s.sensors[sensor.UniqueID]; oldState != nil {
+		if oldState := s.sensors[key]; oldState != nil {
 			if !state.Lastupdated.Equal(oldState.Lastupdated) || state.Buttonevent != oldState.Buttonevent {
-				glog.Infof("Sensor %q [%s] triggered, button: %v", sensor.Name, sensor.UniqueID, state.Buttonevent)
+				glog.Infof("Sensor %s triggered, button: %v", key, state.Buttonevent)
 			}
 		}
 	}
 
 	// Remove metrics
-	for uniqueID, oldState := range s.sensors {
-		if states[uniqueID] == nil {
-			glog.Infof("Sensor %q [%s] removed", oldState.Labels["name"], oldState.Labels["lastupdated"])
+	for key, oldState := range s.sensors {
+		if states[key] == nil {
+			glog.Infof("Sensor %s removed", key)
 			mSensorLastUpdated.Delete(oldState.Labels)
 			mSensorButtonEvent.Delete(oldState.Labels)
 			mSensorOn.Delete(oldState.Labels)
