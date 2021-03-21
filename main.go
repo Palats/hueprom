@@ -58,6 +58,7 @@ func b2f(b bool) float64 {
 type SensorState struct {
 	Labels      prometheus.Labels
 	Lastupdated time.Time
+	Buttonevent int64
 }
 
 type Server struct {
@@ -146,6 +147,14 @@ func (s *Server) scanSensors(ctx context.Context) error {
 			}
 		}
 
+		if _, ok := sensor.State["buttonevent"]; ok {
+			floatButtonevent, ok := sensor.State["buttonevent"].(float64)
+			if !ok {
+				glog.Errorf("unable to read buttonevent %v as float", sensor.State["buttonevent"])
+			}
+			state.Buttonevent = int64(floatButtonevent)
+		}
+
 		// Only record the sensor if all data was fine.
 		states[sensor.UniqueID] = state
 		if state.Lastupdated.IsZero() {
@@ -156,8 +165,8 @@ func (s *Server) scanSensors(ctx context.Context) error {
 
 		// And deal with events.
 		if oldState := s.sensors[sensor.UniqueID]; oldState != nil {
-			if !state.Lastupdated.Equal(oldState.Lastupdated) {
-				glog.Infof("Sensor %q [%s] triggered, button: %v", sensor.Name, sensor.UniqueID, sensor.State["buttonevent"])
+			if !state.Lastupdated.Equal(oldState.Lastupdated) || state.Buttonevent != oldState.Buttonevent {
+				glog.Infof("Sensor %q [%s] triggered, button: %v", sensor.Name, sensor.UniqueID, state.Buttonevent)
 			}
 		}
 	}
