@@ -36,6 +36,10 @@ var (
 		Name: "hue_sensor_reachable",
 		Help: "Is the sensor reachable from the bridge.",
 	}, []string{"name", "uniqueid"})
+	mButtonClick = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "hue_button_click",
+		Help: "Number of time a button has been clicked.",
+	}, []string{"name", "uniqueid", "button"})
 
 	mLightOn = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hue_light_on",
@@ -52,6 +56,7 @@ func init() {
 	prometheus.MustRegister(mSensorButtonEvent)
 	prometheus.MustRegister(mSensorOn)
 	prometheus.MustRegister(mSensorReachable)
+	prometheus.MustRegister(mButtonClick)
 	prometheus.MustRegister(mLightOn)
 	prometheus.MustRegister(mLightReachable)
 }
@@ -195,8 +200,22 @@ func (s *Server) scanSensors(ctx context.Context) error {
 
 		// And deal with events.
 		if oldState := s.sensors[key]; oldState != nil {
-			if !state.Lastupdated.Equal(oldState.Lastupdated) || state.Buttonevent != oldState.Buttonevent {
-				glog.Infof("Sensor %s triggered, button: %v", key, state.Buttonevent)
+			if state.Lastupdated.Equal(oldState.Lastupdated) && state.Buttonevent == oldState.Buttonevent {
+				continue
+
+			}
+			buttonID := fmt.Sprint(state.Buttonevent &^ 3)
+			isLong := (state.Buttonevent & 1) != 0
+			isReleased := (state.Buttonevent & 2) != 0
+			glog.Infof("Sensor %s triggered, buttonevent: %v, button: %v, long: %v, release: %v", key, state.Buttonevent, buttonID, isLong, isReleased)
+			labels := prometheus.Labels{
+				"button": buttonID,
+			}
+			for k, v := range state.Labels {
+				labels[k] = v
+			}
+			if isReleased {
+				mButtonClick.With(labels).Inc()
 			}
 		}
 	}
