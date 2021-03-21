@@ -55,8 +55,16 @@ func b2f(b bool) float64 {
 	return 0.0
 }
 
+type SensorState struct {
+	Labels      prometheus.Labels
+	Lastupdated time.Time
+}
+
 type Server struct {
 	bridge *huego.Bridge
+
+	// Map per unique-id
+	sensors map[string]*SensorState
 }
 
 func New(bridge *huego.Bridge) *Server {
@@ -74,9 +82,13 @@ func (s *Server) Serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// loop takes care of the background polling.
 func (s *Server) loop(ctx context.Context) error {
 	for {
-		if err := s.step(ctx); err != nil {
+		if err := s.scanLights(ctx); err != nil {
+			glog.Error(err)
+		}
+		if err := s.scanSensors(ctx); err != nil {
 			glog.Error(err)
 		}
 
@@ -88,7 +100,7 @@ func (s *Server) loop(ctx context.Context) error {
 	}
 }
 
-func (s *Server) step(ctx context.Context) error {
+func (s *Server) scanLights(ctx context.Context) error {
 	lights, err := s.bridge.GetLightsContext(ctx)
 	if err != nil {
 		return err
@@ -102,31 +114,63 @@ func (s *Server) step(ctx context.Context) error {
 		mLightOn.With(labels).Set(b2f(l.State.On))
 		mLightReachable.With(labels).Set(b2f(l.State.Reachable))
 	}
+	return nil
+}
 
+func (s *Server) scanSensors(ctx context.Context) error {
 	sensors, err := s.bridge.GetSensorsContext(ctx)
 	if err != nil {
 		return err
 	}
 
-	for _, s := range sensors {
-		labels := prometheus.Labels{
-			"name":     s.Name,
-			"uniqueid": s.UniqueID,
+	states := make(map[string]*SensorState)
+
+	for _, sensor := range sensors {
+		state := &SensorState{
+			Labels: prometheus.Labels{
+				"name":     sensor.Name,
+				"uniqueid": sensor.UniqueID,
+			},
 		}
-		lastupdated, ok := s.State["lastupdated"].(string)
+
+		strLastupdated, ok := sensor.State["lastupdated"].(string)
 		if !ok {
-			glog.Errorf("unable to read %v as string", s.State["lastupdated"])
+			glog.Errorf("unable to read %v as string", sensor.State["lastupdated"])
 			continue
 		}
-		if lastupdated != "none" {
-			t, err := time.Parse(timeFormat, lastupdated)
+		if strLastupdated != "none" {
+			state.Lastupdated, err = time.Parse(timeFormat, strLastupdated)
 			if err != nil {
-				glog.Errorf("unable to parse %q: %v\n", lastupdated, err)
+				glog.Errorf("unable to parse %q: %v\n", strLastupdated, err)
 				continue
 			}
-			mSensorLastUpdated.With(labels).Set(float64(t.UnixNano() / 1000))
+		}
+
+		// Only record the sensor if all data was fine.
+		states[sensor.UniqueID] = state
+		if state.Lastupdated.IsZero() {
+			mSensorLastUpdated.Delete(state.Labels)
+		} else {
+			mSensorLastUpdated.With(state.Labels).Set(float64(state.Lastupdated.UnixNano() / 1000))
+		}
+
+		// And deal with events.
+		if oldState := s.sensors[sensor.UniqueID]; oldState != nil {
+			if !state.Lastupdated.Equal(oldState.Lastupdated) {
+				glog.Infof("Sensor %q [%s] triggered", sensor.Name, sensor.UniqueID)
+			}
 		}
 	}
+
+	// Remove metrics
+	for uniqueID, oldState := range s.sensors {
+		if states[uniqueID] == nil {
+			glog.Infof("Sensor %q [%s] removed", oldState.Labels["name"], oldState.Labels["lastupdated"])
+			mSensorLastUpdated.Delete(oldState.Labels)
+		}
+	}
+
+	s.sensors = states
 	return nil
 }
 
