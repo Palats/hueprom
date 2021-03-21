@@ -22,8 +22,21 @@ import (
 var (
 	mSensorLastUpdated = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hue_sensor_lastupdated",
-		Help: "Last update of the sense, in ms since epoch.",
+		Help: "Last update of the sensor, in ms since epoch.",
 	}, []string{"name", "uniqueid"})
+	mSensorButtonEvent = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hue_sensor_buttonevent",
+		Help: "Last update of the sensor, button info.",
+	}, []string{"name", "uniqueid"})
+	mSensorOn = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hue_sensor_on",
+		Help: "Is the sensor seen as as on from the bridge.",
+	}, []string{"name", "uniqueid"})
+	mSensorReachable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hue_sensor_reachable",
+		Help: "Is the sensor reachable from the bridge.",
+	}, []string{"name", "uniqueid"})
+
 	mLightOn = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hue_light_on",
 		Help: "Is the light set to on on the Bridge.",
@@ -36,6 +49,9 @@ var (
 
 func init() {
 	prometheus.MustRegister(mSensorLastUpdated)
+	prometheus.MustRegister(mSensorButtonEvent)
+	prometheus.MustRegister(mSensorOn)
+	prometheus.MustRegister(mSensorReachable)
 	prometheus.MustRegister(mLightOn)
 	prometheus.MustRegister(mLightReachable)
 }
@@ -133,17 +149,12 @@ func (s *Server) scanSensors(ctx context.Context) error {
 				"uniqueid": sensor.UniqueID,
 			},
 		}
+		states[sensor.UniqueID] = state
 
-		strLastupdated, ok := sensor.State["lastupdated"].(string)
-		if !ok {
-			glog.Errorf("unable to read %v as string", sensor.State["lastupdated"])
-			continue
-		}
-		if strLastupdated != "none" {
+		if strLastupdated, ok := sensor.State["lastupdated"].(string); ok && strLastupdated != "none" {
 			state.Lastupdated, err = time.Parse(timeFormat, strLastupdated)
 			if err != nil {
 				glog.Errorf("unable to parse %q: %v\n", strLastupdated, err)
-				continue
 			}
 		}
 
@@ -155,12 +166,30 @@ func (s *Server) scanSensors(ctx context.Context) error {
 			state.Buttonevent = int64(floatButtonevent)
 		}
 
-		// Only record the sensor if all data was fine.
-		states[sensor.UniqueID] = state
 		if state.Lastupdated.IsZero() {
 			mSensorLastUpdated.Delete(state.Labels)
 		} else {
 			mSensorLastUpdated.With(state.Labels).Set(float64(state.Lastupdated.UnixNano() / 1000))
+		}
+
+		if state.Buttonevent == 0 {
+			mSensorButtonEvent.Delete(state.Labels)
+		} else {
+			mSensorButtonEvent.With(state.Labels).Set(float64(state.Buttonevent))
+		}
+
+		isOn, ok := sensor.Config["on"].(bool)
+		if ok {
+			mSensorOn.With(state.Labels).Set(b2f(isOn))
+		} else {
+			mSensorOn.Delete(state.Labels)
+		}
+
+		isReachable, ok := sensor.Config["reachable"].(bool)
+		if ok {
+			mSensorReachable.With(state.Labels).Set(b2f(isReachable))
+		} else {
+			mSensorReachable.Delete(state.Labels)
 		}
 
 		// And deal with events.
@@ -176,6 +205,9 @@ func (s *Server) scanSensors(ctx context.Context) error {
 		if states[uniqueID] == nil {
 			glog.Infof("Sensor %q [%s] removed", oldState.Labels["name"], oldState.Labels["lastupdated"])
 			mSensorLastUpdated.Delete(oldState.Labels)
+			mSensorButtonEvent.Delete(oldState.Labels)
+			mSensorOn.Delete(oldState.Labels)
+			mSensorReachable.Delete(oldState.Labels)
 		}
 	}
 
