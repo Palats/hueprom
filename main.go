@@ -83,7 +83,7 @@ func (s *Server) Serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // loop takes care of the background polling.
-func (s *Server) loop(ctx context.Context) error {
+func (s *Server) loop(ctx context.Context, delay time.Duration) error {
 	for {
 		if err := s.scanLights(ctx); err != nil {
 			glog.Error(err)
@@ -93,7 +93,7 @@ func (s *Server) loop(ctx context.Context) error {
 		}
 
 		select {
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -157,7 +157,7 @@ func (s *Server) scanSensors(ctx context.Context) error {
 		// And deal with events.
 		if oldState := s.sensors[sensor.UniqueID]; oldState != nil {
 			if !state.Lastupdated.Equal(oldState.Lastupdated) {
-				glog.Infof("Sensor %q [%s] triggered", sensor.Name, sensor.UniqueID)
+				glog.Infof("Sensor %q [%s] triggered, button: %v", sensor.Name, sensor.UniqueID, sensor.State["buttonevent"])
 			}
 		}
 	}
@@ -228,7 +228,7 @@ func serve(ctx context.Context, fl *Flags) error {
 	}
 	s := New(bridge)
 	go func() {
-		err := s.loop(ctx)
+		err := s.loop(ctx, fl.Poll)
 		glog.Exitf("Watching loop exited: %v", err)
 	}()
 	http.HandleFunc("/", s.Serve)
@@ -246,6 +246,7 @@ func serve(ctx context.Context, fl *Flags) error {
 type Flags struct {
 	User string
 	Port int
+	Poll time.Duration
 }
 
 // Bridge provides the default bridge instance, using the user from the flags.
@@ -274,6 +275,7 @@ func main() {
 		},
 	}
 	cmdServe.PersistentFlags().IntVar(&fl.Port, "port", 7362, "HTTP port to listen on")
+	cmdServe.PersistentFlags().DurationVar(&fl.Poll, "poll", 100*time.Millisecond, "Hue API polling interval")
 
 	cmdDump := &cobra.Command{
 		Use:   "dump",
