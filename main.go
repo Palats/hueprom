@@ -164,10 +164,10 @@ func (s *Server) scanSensors(ctx context.Context) error {
 			}
 		}
 
-		if _, ok := sensor.State["buttonevent"]; ok {
-			floatButtonevent, ok := sensor.State["buttonevent"].(float64)
+		if v, ok := sensor.State["buttonevent"]; ok && v != nil {
+			floatButtonevent, ok := v.(float64)
 			if !ok {
-				glog.Errorf("Sensor %s, unable to read buttonevent %v as float", key, sensor.State["buttonevent"])
+				glog.Errorf("Sensor %s, unable to read buttonevent %v as float", key, v)
 			}
 			state.Buttonevent = int64(floatButtonevent)
 		}
